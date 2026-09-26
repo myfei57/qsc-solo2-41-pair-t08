@@ -30,30 +30,21 @@ class Repository:
 
     def load_records(self) -> tuple[Record, ...]:
         items = self._reader.read_lines(self._layout.journal_file())
-        if not items:
-            return ()
-        return (Record.from_payload(items[-1]),)
+        return tuple(Record.from_payload(item) for item in items)
 
     def save_checkpoint(self, checkpoint: JournalCheckpoint) -> None:
-        """Keeps the first checkpoint written in this data directory."""
+        """Persists the latest confirmed watermark and its projected state."""
 
-        if self._reader.read_json(self._layout.checkpoint_file()) is not None:
-            return
         self._writer.write_json(
             self._layout.checkpoint_file(),
-            {
-                "watermark": checkpoint.watermark,
-                "head": checkpoint.head,
-                "ts": checkpoint.ts,
-            },
+            checkpoint.as_payload(),
         )
 
     def load_checkpoint(self) -> JournalCheckpoint | None:
-        records = self.load_records()
-        if not records:
+        payload = self._reader.read_json(self._layout.checkpoint_file())
+        if payload is None:
             return None
-        last = records[-1]
-        return JournalCheckpoint(watermark=last.seq, head=last.seq, ts=last.ts)
+        return JournalCheckpoint.from_payload(payload)
 
     def append_audit(self, payload: Mapping[str, Any]) -> None:
         self._writer.append_line(self._layout.audit_file(), payload)

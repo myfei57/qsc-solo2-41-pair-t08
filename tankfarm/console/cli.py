@@ -15,7 +15,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--addr", default="", help="listen address, host:port")
     parser.add_argument("--data", default="", help="data directory")
     parser.add_argument(
-        "--resume", action="store_true", help="replay the stored record stream on start"
+        "--resume",
+        action="store_true",
+        help="deprecated: replay is now the default on every start",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore stored records and start from factory state",
     )
     return parser.parse_args(argv)
 
@@ -33,7 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     settings = settings_for(args)
     services = build_services(settings)
-    if args.resume:
+    if not args.fresh:
         services.restore()
     server = ControlServer(settings.addr, services)
     httpd = server.create()

@@ -89,12 +89,15 @@ from tankfarm.valve.switch import ValveSwitcher
 from tankfarm.versioning import ExpiryPolicy
 from tankfarm.versioning.baseline import Baseline, BaselineBook
 from tankfarm.versioning.generation import (
+    SCOPE_BASELINE,
     SCOPE_SNAPSHOT,
+    SCOPE_VALVE_PERSIST,
     SNAPSHOT_KEY,
     GenerationRegistry,
 )
 from tankfarm.versioning.sheet import ConfirmationSheet, SheetBook
 from tankfarm.versioning.snapshot import SnapshotBook, VersionedSnapshot
+from tankfarm.valve.persist import PERSIST_KEY
 
 class Services:
     """Facade used by the HTTP layer and by the tests."""
@@ -206,11 +209,16 @@ class Services:
         self.auditor.subscribe()
         self.audit = AuditQuery(self.auditor)
         self.last_replay: ReplayResult | None = None
+        self._restored_pending_head = 0
 
     # ---------------------------------------------------------------- journal
 
     def commit(self, seq: int | None = None) -> int:
         value = self.commits.commit(seq)
+        if self._restored_pending_head and value >= self._restored_pending_head:
+            self._restored_pending_head = 0
+            self.projection = self.project(value)
+            self._apply_projection()
         self.repository.save_checkpoint(
             JournalCheckpoint(
                 watermark=value,
@@ -254,6 +262,8 @@ class Services:
 
     def restore(self) -> ReplayResult | None:
         records = self.repository.load_records()
+        self._restore_clock(records)
+        self._restore_ids(records)
         if not records:
             return None
         self.stream.load(records)
@@ -267,6 +277,7 @@ class Services:
             self.projection = self.project(0)
             self._apply_projection()
             self.auditor.restore()
+            self._restored_pending_head = self.stream.head()
             return None
         self.projection = StateProjection.from_snapshot(checkpoint.state)
         self.watermark.advance_to(checkpoint.watermark)
@@ -280,6 +291,8 @@ class Services:
         self._apply_projection()
         self.auditor.restore()
         self.last_replay = result
+        if result.skipped_uncommitted:
+            self._restored_pending_head = result.skipped_uncommitted[0].seq
         return result
 
     def history(self, watermark: int | None = None) -> dict[str, object]:
@@ -574,6 +587,41 @@ class Services:
     def _observe(self, record: Record) -> None:
         self.projection.apply(record)
 
+    def _restore_clock(self, records: tuple[Record, ...]) -> None:
+        latest = self.clock.now()
+        for record in records:
+            latest = max(latest, record.ts)
+        checkpoint = self.repository.load_checkpoint()
+        if checkpoint is not None:
+            latest = max(latest, checkpoint.ts)
+        for entry in self.repository.load_audit():
+            latest = max(latest, int(entry.get("ts", 0)))
+        self.clock.restore(latest)
+
+    def _restore_ids(self, records: tuple[Record, ...]) -> None:
+        def id_number(prefix: str, value: object) -> int | None:
+            if not isinstance(value, str):
+                return None
+            head, sep, raw = value.rpartition("-")
+            if sep and head == prefix and raw.isdigit():
+                return int(raw)
+            return None
+
+        if records:
+            self.ids.restore("rec", records[-1].seq)
+        audit_ids = 0
+        for entry in self.repository.load_audit():
+            number = id_number("audit", entry.get("entry_id"))
+            if number is not None:
+                audit_ids = max(audit_ids, number)
+        self.ids.restore("audit", audit_ids)
+        sheet_ids = 0
+        for record in records:
+            number = id_number("sheet", record.payload.get("sheet_id"))
+            if number is not None:
+                sheet_ids = max(sheet_ids, number)
+        self.ids.restore("sheet", sheet_ids)
+
     def _restore_generations(self) -> None:
         for (scope, key), (number, ts) in self.projection.generations.items():
             self.generations.restore(scope, key, number, ts)
@@ -614,6 +662,8 @@ class Services:
         self.valves.apply_positions(
             dict(self.projection.valve_positions), dict(self.projection.valve_ts)
         )
+        if self.projection.generations.get((SCOPE_VALVE_PERSIST, PERSIST_KEY)):
+            self.valves.mark_all_persisted()
         self.header.restore(self.projection.header_setpoint)
         self.pumps.apply_running(dict(self.projection.pump_running))
         policy = ExpiryPolicy(self.settings.baseline_max_age)
@@ -633,12 +683,15 @@ class Services:
                     self.projection.baselines[tank_id],
                     self.projection.offsets.get(tank_id, 0.0),
                 )
+                issued_at = self.projection.generations.get(
+                    (SCOPE_BASELINE, tank_id), (0, self.clock.now())
+                )[1]
                 self.baselines.record(
                     tank_id=tank_id,
                     value=self.projection.baselines[tank_id],
                     generation=self.projection.baseline_generation.get(tank_id, 0),
                     config_generation=self.revisions.active().generation,
-                    now=self.clock.now(),
+                    now=issued_at,
                     policy=policy,
                 )
             elif tank_id in self.projection.offsets:

@@ -82,6 +82,7 @@ class StateProjection:
             tank_id = str(payload["tank_id"])
             self.baselines[tank_id] = float(payload["value"])
             self.offsets[tank_id] = float(payload["offset"])
+            self.baseline_generation[tank_id] = int(payload["generation"])
             self._note_generation(SCOPE_BASELINE, tank_id, payload, record.ts)
         elif kind == topics.LEVEL_RECALIBRATED:
             self.offsets[str(payload["tank_id"])] = float(payload["offset"])

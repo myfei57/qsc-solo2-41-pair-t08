@@ -60,3 +60,7 @@ class ValveRegistry:
                 continue
             valve.position = position
             valve.updated_at = persisted_at.get(valve_id, valve.updated_at)
+
+    def mark_all_persisted(self) -> None:
+        for valve in self._valves.values():
+            valve.persisted = True

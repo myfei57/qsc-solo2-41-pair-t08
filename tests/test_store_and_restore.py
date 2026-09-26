@@ -101,3 +101,48 @@ def test_restart_restores_header_setpoint(services, restart):
     services.set_setpoint("pump-a", 45.0)
     fresh = restart()
     assert fresh.header.setpoint() == 45.0
+
+
+def test_long_run_then_restart_loses_no_committed_state(services, restart, handover):
+    sheet_id = handover()
+    services.start_pump("pump-a", sheet_id)
+    services.open_valve(VALVE_VENT)
+    services.set_setpoint("pump-a", 45.0)
+    services.fill_inlet(250.0)
+    expected_baseline = services.recalibrate(PROCESS_TANK, 250.0)["baseline"]
+    services.revise_config({"high_limit_mm": 8800.0})
+    services.register_batch("batch-9", PROCESS_TANK)
+    expected_head = services.stream.head()
+    expected_watermark = services.commits.watermark()
+
+    fresh = restart()
+    view = fresh.current_view()
+    assert view.head == expected_head
+    assert view.watermark == expected_watermark
+    assert view.valve_positions[VALVE_VENT] == POSITION_OPEN
+    assert view.header_setpoint == 45.0
+    assert view.pumps["pump-a"]["running"] is True
+    assert fresh.levels.read_raw(PROCESS_TANK) == 3450.0
+    assert fresh.levels.validated_baseline(PROCESS_TANK).value == expected_baseline
+    assert fresh.limits.high_limit() == 8800.0
+    assert fresh.get_batch("batch-9").tank_id == PROCESS_TANK
+
+    # operations keep working after restart and a second restart keeps everything
+    fresh.set_setpoint("pump-a", 50.0)
+    again = restart()
+    view2 = again.current_view()
+    assert view2.header_setpoint == 50.0
+    assert view2.pumps["pump-a"]["running"] is True
+    assert again.levels.read_raw(PROCESS_TANK) == 3450.0
+    assert again.valves.position(VALVE_VENT) == POSITION_OPEN
+    assert again.limits.high_limit() == 8800.0
+    assert again.get_batch("batch-9").tank_id == PROCESS_TANK
+    assert view2.watermark == view2.head
+
+
+def test_restart_keeps_valve_persistence_gate_fact(services, restart):
+    services.persist_valves()
+    services.change_tank()
+    fresh = restart()
+    assert fresh.persister.all_persisted() is True
+    assert not fresh.persister.unpersisted()

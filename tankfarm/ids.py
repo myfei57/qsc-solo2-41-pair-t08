@@ -17,3 +17,8 @@ class IdFactory:
     def counters(self) -> dict[str, int]:
         return dict(self._counters)
 
+    def restore(self, prefix: str, count: int) -> None:
+        """Ensure the next id for ``prefix`` never repeats a durable one."""
+
+        self._counters[prefix] = max(self._counters.get(prefix, 0), int(count))
+
