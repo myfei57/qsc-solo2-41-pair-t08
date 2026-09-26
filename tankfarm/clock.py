@@ -21,3 +21,8 @@ class LogicalClock:
     def age(self, since: int) -> int:
         return self._value - since
 
+    def restore(self, value: int) -> None:
+        """Moves the clock to at least ``value`` (never backwards)."""
+
+        self._value = max(self._value, int(value))
+

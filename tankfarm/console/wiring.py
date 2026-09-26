@@ -19,6 +19,7 @@ from tankfarm.errors import (
     GateBlockedError,
     GaugeNotConfirmedError,
     StageAlreadyReachedError,
+    StoreError,
 )
 from tankfarm.esd.test import TestController
 from tankfarm.esd.trip import TripController, TripResult
@@ -215,7 +216,7 @@ class Services:
             JournalCheckpoint(
                 watermark=value,
                 head=self.stream.head(),
-                ts=self.clock.tick(),
+                ts=self.clock.now(),
                 state=self.projection.snapshot(),
             )
         )
@@ -223,6 +224,8 @@ class Services:
 
     def rollback(self, seq: int, reason: str) -> Record:
         record = self.rollbacks.rollback(seq, reason)
+        # Live projection never folds tombstones; rebuild device state from the
+        # committed stream with the rolled-back record excluded.
         self.rebuild()
         self.commit()
         return record
@@ -262,12 +265,24 @@ class Services:
                 target = record.payload.get("target_seq")
                 if isinstance(target, int):
                     self.tombstones.mark(target)
+        # Logical clock and id counters must continue past their last use so
+        # nothing after restart repeats a timestamp or an identifier.
+        latest_ts = max((record.ts for record in records), default=0)
         checkpoint = self.repository.load_checkpoint()
         if checkpoint is None:
+            # No committed checkpoint: replay the whole stream from the start.
             self.projection = self.project(0)
             self._apply_projection()
+            self.clock.restore(latest_ts)
             self.auditor.restore()
+            self._restore_id_counters()
             return None
+        if checkpoint.watermark > self.stream.head():
+            raise StoreError(
+                str(self.repository.layout.journal_file()),
+                f"checkpoint watermark {checkpoint.watermark} is beyond "
+                f"journal head {self.stream.head()}; committed history is missing",
+            )
         self.projection = StateProjection.from_snapshot(checkpoint.state)
         self.watermark.advance_to(checkpoint.watermark)
         result = replay(
@@ -278,7 +293,9 @@ class Services:
             self.projection.apply,
         )
         self._apply_projection()
+        self.clock.restore(max(latest_ts, checkpoint.ts))
         self.auditor.restore()
+        self._restore_id_counters()
         self.last_replay = result
         return result
 
@@ -572,6 +589,10 @@ class Services:
     # ------------------------------------------------------------- internal
 
     def _observe(self, record: Record) -> None:
+        if record.kind == TOMBSTONE_KIND:
+            # Tombstones only remove records during a rebuild; applying one to
+            # the live fold would record it as if it were ordinary state.
+            return
         self.projection.apply(record)
 
     def _restore_generations(self) -> None:
@@ -596,6 +617,11 @@ class Services:
         self.limits.update(settings.high_limit_mm)
         self.blanket.update(settings.inert_low_kpa, settings.inert_high_kpa)
 
+    def _restore_id_counters(self) -> None:
+        # Record ids are one per journal entry; audit ids one per audit line.
+        self.ids.restore("rec", self.stream.head())
+        self.ids.restore("audit", len(self.auditor.entries()))
+
     def _reset_devices(self) -> None:
         self.valves.reset_to_seed()
         self.pumps.reset_to_seed()
@@ -612,7 +638,9 @@ class Services:
         self._restore_config()
         self._reset_devices()
         self.valves.apply_positions(
-            dict(self.projection.valve_positions), dict(self.projection.valve_ts)
+            dict(self.projection.valve_positions),
+            dict(self.projection.valve_ts),
+            dict(self.projection.valve_persisted),
         )
         self.header.restore(self.projection.header_setpoint)
         self.pumps.apply_running(dict(self.projection.pump_running))

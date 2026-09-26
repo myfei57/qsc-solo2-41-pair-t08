@@ -28,6 +28,7 @@ class StateProjection:
     def __init__(self) -> None:
         self.valve_positions: dict[str, str] = {}
         self.valve_ts: dict[str, int] = {}
+        self.valve_persisted: dict[str, bool] = {}
         self.header_setpoint = 0.0
         self.pump_running: dict[str, bool] = {}
         self.gauges: dict[str, str] = {}
@@ -59,6 +60,8 @@ class StateProjection:
             valve_id = str(payload["valve_id"])
             self.valve_positions[valve_id] = str(payload["position"])
             self.valve_ts[valve_id] = record.ts
+            # A later switch (no persisted flag) invalidates the durable mark.
+            self.valve_persisted[valve_id] = bool(payload.get("persisted", False))
         elif kind == topics.VALVE_PERSISTED:
             self._note_generation(SCOPE_VALVE_PERSIST, PERSIST_KEY, payload, record.ts)
         elif kind == topics.PUMP_STARTED:
@@ -128,6 +131,8 @@ class StateProjection:
     def snapshot(self) -> dict[str, Any]:
         return {
             "valves": dict(self.valve_positions),
+            "valve_ts": dict(self.valve_ts),
+            "valve_persisted": dict(self.valve_persisted),
             "header_setpoint": self.header_setpoint,
             "pumps": dict(self.pump_running),
             "gauges": dict(self.gauges),
@@ -161,6 +166,13 @@ class StateProjection:
         projection = cls()
         projection.valve_positions = {
             str(key): str(value) for key, value in payload.get("valves", {}).items()
+        }
+        projection.valve_ts = {
+            str(key): int(value) for key, value in payload.get("valve_ts", {}).items()
+        }
+        projection.valve_persisted = {
+            str(key): bool(value)
+            for key, value in payload.get("valve_persisted", {}).items()
         }
         projection.header_setpoint = float(payload.get("header_setpoint", 0.0))
         projection.pump_running = {

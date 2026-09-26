@@ -53,10 +53,17 @@ class ValveRegistry:
             valve.persisted = False
             valve.updated_at = 0
 
-    def apply_positions(self, positions: dict[str, str], persisted_at: dict[str, int]) -> None:
+    def apply_positions(
+        self,
+        positions: dict[str, str],
+        persisted_at: dict[str, int],
+        persisted: dict[str, bool] | None = None,
+    ) -> None:
+        persisted = persisted or {}
         for valve_id, position in positions.items():
             valve = self._valves.get(valve_id)
             if valve is None:
                 continue
             valve.position = position
             valve.updated_at = persisted_at.get(valve_id, valve.updated_at)
+            valve.persisted = bool(persisted.get(valve_id, False))

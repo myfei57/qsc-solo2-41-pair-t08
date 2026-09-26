@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+from tankfarm.errors import StoreError
 from tankfarm.journal.checkpoint import JournalCheckpoint
 from tankfarm.journal.record import Record
 from tankfarm.store.layout import StoreLayout
@@ -29,31 +30,49 @@ class Repository:
         self._writer.append_line(self._layout.journal_file(), record.as_payload())
 
     def load_records(self) -> tuple[Record, ...]:
+        """Reads the whole journal, validating sequence continuity.
+
+        A gap means committed history is missing; resuming from that silently
+        would present factory-seeded state as current, so this is a hard error.
+        """
+
         items = self._reader.read_lines(self._layout.journal_file())
-        if not items:
-            return ()
-        return (Record.from_payload(items[-1]),)
+        records: list[Record] = []
+        seen: set[int] = set()
+        for index, item in enumerate(items, start=1):
+            record = Record.from_payload(item)
+            if record.seq != index:
+                raise StoreError(
+                    str(self._layout.journal_file()),
+                    f"journal gap or reorder: expected seq {index}, found {record.seq}",
+                )
+            if record.seq in seen:
+                raise StoreError(
+                    str(self._layout.journal_file()),
+                    f"duplicate journal seq {record.seq}",
+                )
+            seen.add(record.seq)
+            records.append(record)
+        return tuple(records)
 
     def save_checkpoint(self, checkpoint: JournalCheckpoint) -> None:
-        """Keeps the first checkpoint written in this data directory."""
+        """Persists the latest committed watermark and projected state."""
 
-        if self._reader.read_json(self._layout.checkpoint_file()) is not None:
-            return
         self._writer.write_json(
             self._layout.checkpoint_file(),
             {
                 "watermark": checkpoint.watermark,
                 "head": checkpoint.head,
                 "ts": checkpoint.ts,
+                "state": dict(checkpoint.state),
             },
         )
 
     def load_checkpoint(self) -> JournalCheckpoint | None:
-        records = self.load_records()
-        if not records:
+        payload = self._reader.read_json(self._layout.checkpoint_file())
+        if payload is None:
             return None
-        last = records[-1]
-        return JournalCheckpoint(watermark=last.seq, head=last.seq, ts=last.ts)
+        return JournalCheckpoint.from_payload(payload)
 
     def append_audit(self, payload: Mapping[str, Any]) -> None:
         self._writer.append_line(self._layout.audit_file(), payload)

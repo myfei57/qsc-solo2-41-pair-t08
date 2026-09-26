@@ -47,7 +47,11 @@ class ValvePersister:
             valve.mark_persisted(self._clock.tick())
             self._journal.append(
                 topics.VALVE_POSITION,
-                {"valve_id": valve.valve_id, "position": valve.position},
+                {
+                    "valve_id": valve.valve_id,
+                    "position": valve.position,
+                    "persisted": True,
+                },
             )
         generation = self._generations.bump(SCOPE_VALVE_PERSIST, PERSIST_KEY, now)
         config_generation = self._generations.current(SCOPE_CONFIG, CONFIG_KEY)
